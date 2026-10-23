@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Team Notes</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c1f24; --muted:#6b7280; --accent:#2563eb; --line:#e5e7eb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171c; --card:#1d2128; --text:#e8eaed; --muted:#9aa3af; --accent:#60a5fa; --line:#2b313a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:560px; margin:0 auto; padding:32px 16px; }
+  h1 { margin:0 0 16px; font-size:1.6rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  input { width:100%; padding:10px 12px; margin-bottom:8px; border:1px solid var(--line); border-radius:8px;
+          background:var(--bg); color:var(--text); font:inherit; }
+  button { padding:9px 14px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  button.link { background:none; color:var(--muted); padding:0 4px; }
+  .row { display:flex; gap:8px; }
+  .row input { margin:0; }
+  ul { list-style:none; padding:0; margin:0; }
+  li { display:flex; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--line); }
+  li:first-child { border-top:0; }
+  small { color:var(--muted); display:block; }
+  #msg { color:#dc2626; min-height:1.4em; margin:8px 0 0; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Team Notes</h1>
+
+  <section id="auth" class="card">
+    <input id="email" type="email" placeholder="Email" autocomplete="username">
+    <input id="pw" type="password" placeholder="Password (min. 8 characters)" autocomplete="current-password">
+    <div class="row">
+      <button id="login">Log in</button>
+      <button id="signup" class="secondary">Sign up</button>
+    </div>
+    <p id="msg"></p>
+  </section>
+
+  <section id="app" hidden>
+    <p>Signed in as <b id="who"></b> <button id="logout" class="link">Log out</button></p>
+    <form id="form" class="card row">
+      <input id="text" placeholder="Write a note..." maxlength="500" required>
+      <button>Add</button>
+    </form>
+    <div class="card"><ul id="list"></ul></div>
+  </section>
+</main>
+
+<script>
+const CLIENT_ID = "__CLIENT_ID__";
+const REGION = "__REGION__";
+const $ = (id) => document.getElementById(id);
+
+let token = sessionStorage.getItem("token");
+let email = sessionStorage.getItem("email");
+
+async function cognito(target, body) {
+  const res = await fetch(`https://cognito-idp.${REGION}.amazonaws.com/`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-amz-json-1.1",
+      "X-Amz-Target": "AWSCognitoIdentityProviderService." + target,
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || data.__type || "Request failed");
+  return data;
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+  });
+  if (res.status === 401) { logout(); throw new Error("Session expired, please log in again"); }
+  if (!res.ok) throw new Error("Request failed (" + res.status + ")");
+  return res.status === 204 ? null : res.json();
+}
+
+function say(text) { $("msg").textContent = text || ""; }
+
+function show() {
+  const loggedIn = Boolean(token);
+  $("auth").hidden = loggedIn;
+  $("app").hidden = !loggedIn;
+  if (loggedIn) { $("who").textContent = email; load(); }
+}
+
+function logout() {
+  token = null; email = null;
+  sessionStorage.clear();
+  show();
+}
+
+async function login() {
+  say("");
+  try {
+    const em = $("email").value.trim();
+    const data = await cognito("InitiateAuth", {
+      AuthFlow: "USER_PASSWORD_AUTH",
+      ClientId: CLIENT_ID,
+      AuthParameters: { USERNAME: em, PASSWORD: $("pw").value },
+    });
+    token = data.AuthenticationResult.IdToken;
+    email = em;
+    sessionStorage.setItem("token", token);
+    sessionStorage.setItem("email", email);
+    show();
+  } catch (e) { say(e.message); }
+}
+
+async function signup() {
+  say("");
+  try {
+    await cognito("SignUp", { ClientId: CLIENT_ID, Username: $("email").value.trim(), Password: $("pw").value });
+    await login();
+  } catch (e) { say(e.message); }
+}
+
+async function load() {
+  const list = $("list");
+  list.replaceChildren();
+  try {
+    const notes = await api("/notes");
+    if (!notes.length) {
+      const li = document.createElement("li");
+      li.textContent = "No notes yet. Add your first one above.";
+      list.append(li);
+    }
+    for (const n of notes) {
+      const li = document.createElement("li");
+      const box = document.createElement("div");
+      box.textContent = n.text;                       // textContent: no HTML injection
+      const when = document.createElement("small");
+      when.textContent = n.created.replace("T", " ").replace("Z", " UTC");
+      box.append(when);
+      const del = document.createElement("button");
+      del.className = "link";
+      del.textContent = "Delete";
+      del.onclick = async () => { await api("/notes/" + n.id, { method: "DELETE" }); load(); };
+      li.append(box, del);
+      list.append(li);
+    }
+  } catch (e) { /* api() already handled expired sessions */ }
+}
+
+$("login").onclick = login;
+$("signup").onclick = signup;
+$("logout").onclick = logout;
+$("form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const input = $("text");
+  await api("/notes", { method: "POST", body: JSON.stringify({ text: input.value }) });
+  input.value = "";
+  load();
+};
+
+show();
+</script>
+</body>
+</html>
